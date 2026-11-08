@@ -1,6 +1,6 @@
 name: Build XDesktop (Windows exe)
-​
-on:
+
+"on":
   workflow_dispatch:
     inputs:
       allow_test_api:
@@ -11,14 +11,14 @@ on:
         description: 'Publish the portable ZIP as a prerelease'
         type: boolean
         default: false
-​
+
 permissions:
   contents: read
-​
+
 concurrency:
   group: xdesktop-windows-${{ github.ref }}
   cancel-in-progress: false
-​
+
 jobs:
   build:
     name: Windows x64 Release
@@ -30,7 +30,7 @@ jobs:
     env:
       TBUILD: D:\TBuild
       LibrariesPath: D:\TBuild\Libraries\win64
-​
+
     steps:
       - name: Checkout this repository (recursive submodules)
         uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
           fetch-depth: 0
           path: source
           persist-credentials: false
-​
+
       - name: Validate API configuration before preparing libraries
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
@@ -63,7 +63,7 @@ jobs:
           } else {
             throw 'Set TELEGRAM_API_ID + TELEGRAM_API_HASH (or TDESKTOP_API_ID + TDESKTOP_API_HASH) as repository Actions secrets. Alternatively explicitly enable allow_test_api for a test build only. Never put API hashes in workflow inputs.'
           }
-​
+
       - name: Prepare source layout and MSYS2 package fix
         run: |
           $ErrorActionPreference = 'Stop'
@@ -83,14 +83,14 @@ jobs:
           "SOURCE_SHA=$(git -C "$env:TBUILD\tdesktop" rev-parse HEAD)" >> $env:GITHUB_ENV
           git config --global user.name 'XDesktop CI'
           git config --global user.email 'xdesktop-ci@users.noreply.github.com'
-​
+
       - name: Initialize MSVC x64 (Windows 7 compatible toolset)
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
           sdk: ${{ env.SDK }}
           toolset: '14.44'
-​
+
       - name: Show toolchain
         run: |
           cmake --version
@@ -99,7 +99,7 @@ jobs:
             throw 'The selected MSVC 14.44 toolset needs ATL/MFC headers installed on this runner.'
           }
           Get-PSDrive D | Select-Object Name, Free, Used
-​
+
       - name: Configure NuGet source
         shell: cmd
         run: |
@@ -107,7 +107,7 @@ jobs:
           nuget sources Update -Name nuget.org -Source https://api.nuget.org/v3/index.json
           if errorlevel 1 nuget sources Add -Name nuget.org -Source https://api.nuget.org/v3/index.json
           if errorlevel 1 exit /b 1
-​
+
       - name: Cache third-party tools and libraries
         uses: actions/cache@v4
         with:
@@ -116,7 +116,7 @@ jobs:
             D:\TBuild\Libraries
           key: Windows-x64-xdesktop-v1-${{ env.CACHE_KEY }}
           restore-keys: Windows-x64-xdesktop-v1-
-​
+
       - name: Prepare dependencies (including Release)
         shell: cmd
         run: |
@@ -125,7 +125,7 @@ jobs:
             powershell -NoProfile -Command "Get-Content '%GITHUB_WORKSPACE%\logs\prepare.log' -Tail 150"
             exit /b 1
           )
-​
+
       - name: Configure and build Release
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
@@ -146,7 +146,7 @@ jobs:
           $parallel = [Math]::Max(1, [Math]::Min([Environment]::ProcessorCount, [int][Math]::Floor($ram / 2.5GB)))
           & cmake --build ..\out --config Release --parallel $parallel *> "$env:GITHUB_WORKSPACE\logs\build.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:GITHUB_WORKSPACE\logs\build.log" -Tail 150; throw 'Build failed.' }
-​
+
       - name: Package portable executable and checksums
         id: package
         run: |
@@ -174,7 +174,7 @@ jobs:
           "zip=$zip" >> $env:GITHUB_OUTPUT
           "tag=xdesktop-build-$env:GITHUB_RUN_ID" >> $env:GITHUB_OUTPUT
           "### XDesktop Windows x64`n`nCommit: $env:SOURCE_SHA`n`nAPI mode: $env:API_MODE`n`nDownload the portable ZIP artifact, extract it, then run XDesktop.exe. The binary is unsigned and has not been runtime-tested by this workflow." >> $env:GITHUB_STEP_SUMMARY
-​
+
       - name: Upload executable and portable ZIP
         uses: actions/upload-artifact@v4
         with:
@@ -185,7 +185,7 @@ jobs:
             SHA256SUMS.txt
           retention-days: 30
           if-no-files-found: error
-​
+
       - name: Redact API credentials from downloadable logs
         id: redact
         if: always()
@@ -202,7 +202,7 @@ jobs:
             foreach ($value in $values) { $text = $text.Replace($value, '[REDACTED]') }
             [IO.File]::WriteAllText($_.FullName, $text)
           }
-​
+
       - name: Upload build logs after redaction
         if: ${{ always() && steps.redact.outcome == 'success' }}
         uses: actions/upload-artifact@v4
@@ -211,7 +211,7 @@ jobs:
           path: logs/
           retention-days: 7
           if-no-files-found: ignore
-​
+
   release:
     if: ${{ inputs.create_release }}
     needs: build
@@ -234,4 +234,3 @@ jobs:
           files: |
             release-files/XDesktop-windows-x64-*.zip
             release-files/SHA256SUMS.txt
-​
