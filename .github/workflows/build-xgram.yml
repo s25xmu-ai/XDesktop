@@ -1,230 +1,237 @@
-name: Build XGram Desktop (Windows x64)
-
+name: Build XDesktop (Windows exe)
+​
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
-    paths:
-      - ".github/workflows/build-xgram.yml"
-
+    inputs:
+      allow_test_api:
+        description: 'Allow limited TEST ONLY API credentials if repository secrets are missing (not for distribution)'
+        type: boolean
+        default: false
+      create_release:
+        description: 'Publish the portable ZIP as a prerelease'
+        type: boolean
+        default: false
+​
 permissions:
   contents: read
-
-env:
-  REPOSITORY_NAME: tdesktop
-  SOURCE_REPOSITORY: s25xmu-ai/tdesktop
-  SOURCE_REF: dev
-  APP_NAME: XGram
-
+​
+concurrency:
+  group: xdesktop-windows-${{ github.ref }}
+  cancel-in-progress: false
+​
 jobs:
-  windows:
+  build:
     name: Windows x64 Release
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 360
     defaults:
       run:
-        shell: cmd
-
-    steps:
-      - name: Prepare build directories
-        run: |
-          if not exist "%USERPROFILE%\TBuild" mkdir "%USERPROFILE%\TBuild"
-          if not exist "%USERPROFILE%\TBuild\Libraries" mkdir "%USERPROFILE%\TBuild\Libraries"
-          if exist "%GITHUB_WORKSPACE%\TBuild" rmdir "%GITHUB_WORKSPACE%\TBuild"
-          mklink /D "%GITHUB_WORKSPACE%\TBuild" "%USERPROFILE%\TBuild"
-          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>"%GITHUB_ENV%"
-          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>"%GITHUB_ENV%"
-
-      - name: Checkout XGram Desktop source
-        uses: actions/checkout@v7
-        with:
-          repository: s25xmu-ai/tdesktop
-          ref: dev
-          submodules: recursive
-          path: TBuild/tdesktop
-          fetch-depth: 0
-
-      - name: Fix MSYS2 diffutils package name
         shell: pwsh
+    env:
+      TBUILD: D:\TBuild
+      LibrariesPath: D:\TBuild\Libraries\win64
+​
+    steps:
+      - name: Checkout this repository (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+​
+      - name: Validate API configuration before preparing libraries
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+          ALLOW_TEST_API: ${{ inputs.allow_test_api }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $prepare = Join-Path $env:GITHUB_WORKSPACE "TBuild\tdesktop\Telegram\build\prepare\prepare.py"
-          if (!(Test-Path -LiteralPath $prepare)) {
-            throw "prepare.py not found at $prepare"
+          $ErrorActionPreference = 'Stop'
+          $id = $env:TELEGRAM_API_ID
+          $hash = $env:TELEGRAM_API_HASH
+          if (!$id -and !$hash) {
+            $id = $env:TDESKTOP_API_ID
+            $hash = $env:TDESKTOP_API_HASH
           }
-          $source = Get-Content -Raw -LiteralPath $prepare
-          $old = "mingw-w64-x86_64-diffutils"
-          $count = ([regex]::Matches($source, [regex]::Escape($old))).Count
-          if ($count -ne 1) {
-            throw "Expected exactly one '$old' occurrence in prepare.py, found $count. Refusing to patch silently."
+          if (!$id -and !$hash -and $env:ALLOW_TEST_API -eq 'true') {
+            'API_MODE=test' >> $env:GITHUB_ENV
+            Write-Warning 'TEST ONLY API credentials: this executable is not suitable for distribution or reliable normal login.'
+          } elseif ($id -match '^[1-9][0-9]*$' -and $hash -match '^[0-9a-fA-F]{32}$') {
+            'API_MODE=custom' >> $env:GITHUB_ENV
+          } else {
+            throw 'Set TELEGRAM_API_ID + TELEGRAM_API_HASH (or TDESKTOP_API_ID + TDESKTOP_API_HASH) as repository Actions secrets. Alternatively explicitly enable allow_test_api for a test build only. Never put API hashes in workflow inputs.'
           }
-          $source = $source.Replace($old, "diffutils")
-          Set-Content -LiteralPath $prepare -Value $source -NoNewline
-          Write-Host "Patched prepare.py to install the MSYS2 diffutils package."
-
-      - name: Read Windows SDK and prepare cache key
-        shell: bash
+​
+      - name: Prepare source layout and MSYS2 package fix
         run: |
-          set -e
-          DOCPATH="$GITHUB_WORKSPACE/TBuild/tdesktop/docs/building-win.md"
-          if [ ! -f "$DOCPATH" ]; then
-            echo "::error::docs/building-win.md was not found in the checked-out repository."
-            exit 1
-          fi
-          SDK="$(grep -m1 "SDK version" "$DOCPATH" | sed -E 's/.*\*\*([^*]+)\*\* SDK version.*/\1/')"
-          if [ -z "$SDK" ] || [ "$SDK" = "$DOCPATH" ]; then
-            echo "::error::Could not read the Windows SDK version from docs/building-win.md."
-            exit 1
-          fi
-          echo "SDK=$SDK" >> "$GITHUB_ENV"
-          sha256sum "$GITHUB_WORKSPACE/TBuild/tdesktop/Telegram/build/prepare/prepare.py" | awk '{print $1}' > CACHE_KEY.txt
-          echo "$SDK" >> CACHE_KEY.txt
-          git -C "$GITHUB_WORKSPACE/TBuild/tdesktop" rev-parse HEAD >> CACHE_KEY.txt
-          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{print $1}')" >> "$GITHUB_ENV"
-
-      - name: Initialize MSVC x64 environment
-        uses: Eden-CI/msvc-dev-cmd@master
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force "$env:TBUILD\Libraries", "$env:TBUILD\ThirdParty", "$env:GITHUB_WORKSPACE\logs" | Out-Null
+          Move-Item "$env:GITHUB_WORKSPACE\source" "$env:TBUILD\tdesktop"
+          $prepare = "$env:TBUILD\tdesktop\Telegram\build\prepare\prepare.py"
+          $text = Get-Content $prepare -Raw
+          $old = 'mingw-w64-x86_64-diffutils'
+          $count = ([regex]::Matches($text, [regex]::Escape($old))).Count
+          if ($count -gt 1) { throw 'Unexpected prepare.py layout; review the diffutils patch.' }
+          if ($count -eq 1) { [IO.File]::WriteAllText($prepare, $text.Replace($old, 'diffutils')) }
+          $doc = Get-Content "$env:TBUILD\tdesktop\docs\building-win.md" -Raw
+          $match = [regex]::Match($doc, '\*\*([0-9.]+)\*\* SDK version')
+          if (!$match.Success) { throw 'Cannot determine the required Windows SDK.' }
+          "SDK=$($match.Groups[1].Value)" >> $env:GITHUB_ENV
+          "CACHE_KEY=$((Get-FileHash $prepare -Algorithm SHA256).Hash)-$($match.Groups[1].Value)" >> $env:GITHUB_ENV
+          "SOURCE_SHA=$(git -C "$env:TBUILD\tdesktop" rev-parse HEAD)" >> $env:GITHUB_ENV
+          git config --global user.name 'XDesktop CI'
+          git config --global user.email 'xdesktop-ci@users.noreply.github.com'
+​
+      - name: Initialize MSVC x64 (Windows 7 compatible toolset)
+        uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
           sdk: ${{ env.SDK }}
-          toolset: 14.44
-
-      - name: Configure NuGet
+          toolset: '14.44'
+​
+      - name: Show toolchain
+        run: |
+          cmake --version
+          python --version
+          if (!$env:VCToolsInstallDir -or !(Test-Path "$env:VCToolsInstallDir\atlmfc\include\atlbase.h")) {
+            throw 'The selected MSVC 14.44 toolset needs ATL/MFC headers installed on this runner.'
+          }
+          Get-PSDrive D | Select-Object Name, Free, Used
+​
+      - name: Configure NuGet source
+        shell: cmd
         run: |
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
-          nuget sources Add -Source https://api.nuget.org/v3/index.json
-          if errorlevel 1 exit /b 0
-
-      - name: Cache third-party sources
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.TBUILD }}\ThirdParty
-          key: ${{ runner.os }}-x64-third-party-${{ env.CACHE_KEY }}
-          restore-keys: |
-            ${{ runner.os }}-x64-third-party-
-
-      - name: Cache prebuilt libraries
-        uses: actions/cache@v6
+          nuget sources Update -Name nuget.org -Source https://api.nuget.org/v3/index.json
+          if errorlevel 1 nuget sources Add -Name nuget.org -Source https://api.nuget.org/v3/index.json
+          if errorlevel 1 exit /b 1
+​
+      - name: Cache third-party tools and libraries
+        uses: actions/cache@v4
         with:
           path: |
-            ${{ env.LibrariesPath }}\*
-            !${{ env.LibrariesPath }}\cache_keys
-            !${{ env.LibrariesPath }}\[qQ]t[_-]*
-            ${{ env.LibrariesPath }}\cache_keys\*
-            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
-          key: ${{ runner.os }}-x64-libs-${{ env.CACHE_KEY }}
-          restore-keys: |
-            ${{ runner.os }}-x64-libs-
-
-      - name: Ensure Visual Studio ATL/MFC headers are installed
-        shell: pwsh
+            D:\TBuild\ThirdParty
+            D:\TBuild\Libraries
+          key: Windows-x64-xdesktop-v1-${{ env.CACHE_KEY }}
+          restore-keys: Windows-x64-xdesktop-v1-
+​
+      - name: Prepare dependencies (including Release)
+        shell: cmd
         run: |
-          $ErrorActionPreference = "Stop"
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (!(Test-Path $vswhere)) {
-            throw "vswhere.exe not found; cannot locate Visual Studio Installer."
-          }
-          $vsPath = & $vswhere -latest -products * -property installationPath
-          if (!$vsPath) {
-            throw "No Visual Studio installation found."
-          }
-          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-          if (!(Test-Path $installer)) {
-            throw "Visual Studio setup.exe not found at $installer"
-          }
-          & $installer modify --installPath "$vsPath" --add Microsoft.VisualStudio.Component.VC.ATL --add Microsoft.VisualStudio.Component.VC.ATLMFC --quiet --wait --norestart
-          if ($LASTEXITCODE -ne 0) {
-            throw "Visual Studio ATL/MFC component installation failed with exit code $LASTEXITCODE"
-          }
-          Write-Host "ATL/MFC components installed for $vsPath"
-
-      - name: Prepare third-party libraries
-        run: |
-          if not exist logs mkdir logs
-          rem Remove a potentially partial MSYS2 install restored from cache.
-          if exist "%TBUILD%\ThirdParty\msys64" rmdir /S /Q "%TBUILD%\ThirdParty\msys64"
-          if exist "%TBUILD%\ThirdParty\msys64.exe" del /F /Q "%TBUILD%\ThirdParty\msys64.exe"
-          call "%TBUILD%\tdesktop\Telegram\build\prepare\win.bat" silent > logs\prepare.log 2>&1
+          call "%TBUILD%\tdesktop\Telegram\build\prepare\win.bat" silent > "%GITHUB_WORKSPACE%\logs\prepare.log" 2>&1
           if errorlevel 1 (
-            echo First preparation attempt failed. Cleaning MSYS2 and retrying once...>>logs\prepare.log
-            if exist "%TBUILD%\ThirdParty\msys64" rmdir /S /Q "%TBUILD%\ThirdParty\msys64"
-            if exist "%TBUILD%\ThirdParty\msys64.exe" del /F /Q "%TBUILD%\ThirdParty\msys64.exe"
-            call "%TBUILD%\tdesktop\Telegram\build\prepare\win.bat" silent >> logs\prepare.log 2>&1
-            if errorlevel 1 (
-              type logs\prepare.log
-              exit /b 1
-            )
+            powershell -NoProfile -Command "Get-Content '%GITHUB_WORKSPACE%\logs\prepare.log' -Tail 150"
+            exit /b 1
           )
-          type logs\prepare.log
-
-      - name: Select Telegram API credentials
-        shell: bash
+​
+      - name: Configure and build Release
         env:
-          API_ID: ${{ secrets.TDESKTOP_API_ID }}
-          API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
         run: |
-          if [ -n "$API_ID" ] && [ -n "$API_HASH" ]; then
-            echo "TDESKTOP_API_FLAGS=-D TDESKTOP_API_ID=$API_ID -D TDESKTOP_API_HASH=$API_HASH" >> "$GITHUB_ENV"
-          else
-            echo "TDESKTOP_API_FLAGS=-D TDESKTOP_API_TEST=ON" >> "$GITHUB_ENV"
-            echo "::warning::API secrets are not configured; this build will use test API credentials and may not be suitable for normal use."
-          fi
-
-      - name: Configure and build Release x64
+          $ErrorActionPreference = 'Stop'
+          $id = $env:TELEGRAM_API_ID
+          $hash = $env:TELEGRAM_API_HASH
+          if (!$id -and !$hash) { $id = $env:TDESKTOP_API_ID; $hash = $env:TDESKTOP_API_HASH }
+          $api = @('-D', 'TDESKTOP_API_TEST=ON')
+          if ($env:API_MODE -eq 'custom') { $api = @('-D', "TDESKTOP_API_ID=$id", '-D', "TDESKTOP_API_HASH=$hash") }
+          Set-Location "$env:TBUILD\tdesktop\Telegram"
+          & .\configure.bat x64 @api -D CMAKE_CONFIGURATION_TYPES=Release -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON *> "$env:GITHUB_WORKSPACE\logs\configure.log"
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:GITHUB_WORKSPACE\logs\configure.log" -Tail 150; throw 'Configure failed.' }
+          $ram = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+          $parallel = [Math]::Max(1, [Math]::Min([Environment]::ProcessorCount, [int][Math]::Floor($ram / 2.5GB)))
+          & cmake --build ..\out --config Release --parallel $parallel *> "$env:GITHUB_WORKSPACE\logs\build.log"
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:GITHUB_WORKSPACE\logs\build.log" -Tail 150; throw 'Build failed.' }
+​
+      - name: Package portable executable and checksums
+        id: package
         run: |
-          if not exist "%GITHUB_WORKSPACE%\logs" mkdir "%GITHUB_WORKSPACE%\logs"
-          cd /D "%TBUILD%\tdesktop\Telegram"
-          call configure.bat x64 %TDESKTOP_API_FLAGS% -D CMAKE_CONFIGURATION_TYPES=Release -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -Wno-dev > "%GITHUB_WORKSPACE%\logs\configure.log" 2>&1
-          if errorlevel 1 (
-            type "%GITHUB_WORKSPACE%\logs\configure.log"
-            exit /b 1
-          )
-          type "%GITHUB_WORKSPACE%\logs\configure.log"
-          cmake --build ..\out --config Release --parallel > "%GITHUB_WORKSPACE%\logs\build.log" 2>&1
-          if errorlevel 1 (
-            type "%GITHUB_WORKSPACE%\logs\build.log"
-            exit /b 1
-          )
-          type "%GITHUB_WORKSPACE%\logs\build.log"
-
-      - name: Collect XGram executable
-        run: |
-          if not exist "%TBUILD%\tdesktop\out\Release\Telegram.exe" (
-            echo ERROR: Telegram.exe was not found in the Release output folder.
-            exit /b 1
-          )
-          if not exist artifact mkdir artifact
-          copy /Y "%TBUILD%\tdesktop\out\Release\Telegram.exe" "artifact\XGram.exe"
-          if errorlevel 1 exit /b %errorlevel%
-
-      - name: Zip build logs
-        if: always()
-        shell: pwsh
-        run: |
-          $logDir = Join-Path $env:GITHUB_WORKSPACE "logs"
-          if (!(Test-Path $logDir)) {
-            New-Item -ItemType Directory -Path $logDir | Out-Null
-          }
-          $logFiles = Get-ChildItem -Path $logDir -File -ErrorAction SilentlyContinue
-          if ($logFiles) {
-            Compress-Archive -Path (Join-Path $logDir "*") -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "XGram-build-logs.zip") -Force
-          } else {
-            "No step logs were produced. Open the failed step in GitHub Actions for its output." | Set-Content (Join-Path $logDir "README.txt")
-            Compress-Archive -Path (Join-Path $logDir "*") -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "XGram-build-logs.zip") -Force
-          }
-
-      - name: Upload build logs (including on failure)
-        if: always()
-        uses: actions/upload-artifact@v7
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:TBUILD\tdesktop\out\Release"
+          if (!(Test-Path "$out\Telegram.exe")) { throw 'Release Telegram.exe is missing.' }
+          $dist = "$env:GITHUB_WORKSPACE\dist"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          Copy-Item "$out\Telegram.exe" "$dist\XDesktop.exe"
+          Get-ChildItem $out -File | Where-Object { $_.Extension -eq '.dll' } | Copy-Item -Destination $dist
+          Copy-Item "$env:TBUILD\tdesktop\LICENSE" $dist
+          @{
+            repository = $env:GITHUB_REPOSITORY
+            commit = $env:SOURCE_SHA
+            architecture = 'x64'
+            configuration = 'Release'
+            api_mode = $env:API_MODE
+            note = 'Unsigned portable build. Filename alias only; in-app branding and DC/RSA settings are unchanged. Auto-update disabled.'
+          } | ConvertTo-Json | Set-Content "$dist\build-info.json"
+          $short = $env:SOURCE_SHA.Substring(0, 12)
+          $zip = "$env:GITHUB_WORKSPACE\XDesktop-windows-x64-$short.zip"
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+          $files = @("$dist\XDesktop.exe", $zip)
+          $files | ForEach-Object { $h = Get-FileHash $_ -Algorithm SHA256; "$($h.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($_))" } | Set-Content "$env:GITHUB_WORKSPACE\SHA256SUMS.txt"
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "tag=xdesktop-build-$env:GITHUB_RUN_ID" >> $env:GITHUB_OUTPUT
+          "### XDesktop Windows x64`n`nCommit: $env:SOURCE_SHA`n`nAPI mode: $env:API_MODE`n`nDownload the portable ZIP artifact, extract it, then run XDesktop.exe. The binary is unsigned and has not been runtime-tested by this workflow." >> $env:GITHUB_STEP_SUMMARY
+​
+      - name: Upload executable and portable ZIP
+        uses: actions/upload-artifact@v4
         with:
-          name: XGram-build-logs
-          path: XGram-build-logs.zip
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Upload Windows x64 artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: XGram-Desktop-Windows-x64-Release
-          path: artifact/XGram.exe
+          name: XDesktop-windows-x64-${{ github.run_id }}
+          path: |
+            dist/
+            XDesktop-windows-x64-*.zip
+            SHA256SUMS.txt
+          retention-days: 30
           if-no-files-found: error
+​
+      - name: Redact API credentials from downloadable logs
+        id: redact
+        if: always()
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $values = @($env:TELEGRAM_API_ID, $env:TELEGRAM_API_HASH, $env:TDESKTOP_API_ID, $env:TDESKTOP_API_HASH) | Where-Object { $_ }
+          Get-ChildItem "$env:GITHUB_WORKSPACE\logs" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $text = [IO.File]::ReadAllText($_.FullName)
+            foreach ($value in $values) { $text = $text.Replace($value, '[REDACTED]') }
+            [IO.File]::WriteAllText($_.FullName, $text)
+          }
+​
+      - name: Upload build logs after redaction
+        if: ${{ always() && steps.redact.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: XDesktop-build-logs-${{ github.run_id }}
+          path: logs/
           retention-days: 7
+          if-no-files-found: ignore
+​
+  release:
+    if: ${{ inputs.create_release }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: XDesktop-windows-x64-${{ github.run_id }}
+          path: release-files
+      - name: Publish optional prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: xdesktop-build-${{ github.run_id }}
+          target_commitish: ${{ github.sha }}
+          name: XDesktop Windows x64 (build ${{ github.run_number }})
+          prerelease: true
+          body: 'Unsigned portable build. Check build-info.json for API mode; test API builds are not for distribution.'
+          files: |
+            release-files/XDesktop-windows-x64-*.zip
+            release-files/SHA256SUMS.txt
+​
