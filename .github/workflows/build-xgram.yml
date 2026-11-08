@@ -57,6 +57,38 @@ jobs:
           git config --global user.name 'XDesktop CI'
           git config --global user.email 'xdesktop-ci@users.noreply.github.com'
 
+      - name: Install ATL and MFC for the selected MSVC 14.44 toolset
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerRoot = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vswhere = Join-Path $installerRoot 'vswhere.exe'
+          if (!(Test-Path $vswhere)) { throw 'Visual Studio Installer was not found.' }
+          $vs = (& $vswhere -latest -prerelease -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+          if (!$vs) { throw 'A Visual Studio installation with C++ tools is required.' }
+          $toolsets = Join-Path $vs 'VC\Tools\MSVC'
+          $selected = Get-ChildItem $toolsets -Directory -Filter '14.44.*' | Sort-Object Name -Descending | Select-Object -First 1
+          $atl = if ($selected) { Join-Path $selected.FullName 'atlmfc\include\atlbase.h' } else { '' }
+          if (!$atl -or !(Test-Path $atl)) {
+            $setup = Join-Path $installerRoot 'setup.exe'
+            if (!(Test-Path $setup)) { throw 'Visual Studio setup.exe was not found.' }
+            $arguments = @(
+              'modify', '--installPath', ('"' + $vs + '"'),
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL',
+              '--add', 'Microsoft.VisualStudio.Component.VC.14.44.17.14.MFC',
+              '--quiet', '--norestart', '--nocache'
+            )
+            $process = Start-Process -FilePath $setup -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) {
+              Get-ChildItem $env:TEMP -Filter 'dd_setup*' -File | Sort-Object LastWriteTime -Descending | Select-Object -First 2 | ForEach-Object { Get-Content $_.FullName -Tail 60 }
+              throw "ATL/MFC installation failed with exit code $($process.ExitCode)."
+            }
+          }
+          $selected = Get-ChildItem $toolsets -Directory -Filter '14.44.*' | Sort-Object Name -Descending | Select-Object -First 1
+          if (!$selected -or !(Test-Path (Join-Path $selected.FullName 'atlmfc\include\atlbase.h'))) {
+            throw 'MSVC 14.44 ATL headers are still missing after installation.'
+          }
+          Write-Host "Verified MSVC 14.44 ATL headers in $($selected.FullName)."
+
       - name: Initialize MSVC x64 (Windows 7 compatible toolset)
         uses: ilammy/msvc-dev-cmd@v1
         with:
