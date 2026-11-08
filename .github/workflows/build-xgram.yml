@@ -3,10 +3,6 @@ name: Build XDesktop (Windows exe)
 "on":
   workflow_dispatch:
     inputs:
-      allow_test_api:
-        description: 'Allow limited TEST ONLY API credentials if repository secrets are missing (not for distribution)'
-        type: boolean
-        default: false
       create_release:
         description: 'Publish the portable ZIP as a prerelease'
         type: boolean
@@ -30,6 +26,7 @@ jobs:
     env:
       TBUILD: D:\TBuild
       LibrariesPath: D:\TBuild\Libraries\win64
+      API_MODE: independent-server-placeholder
 
     steps:
       - name: Checkout this repository (recursive submodules)
@@ -39,30 +36,6 @@ jobs:
           fetch-depth: 0
           path: source
           persist-credentials: false
-
-      - name: Validate API configuration before preparing libraries
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
-          TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
-          ALLOW_TEST_API: ${{ inputs.allow_test_api }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $id = $env:TELEGRAM_API_ID
-          $hash = $env:TELEGRAM_API_HASH
-          if (!$id -and !$hash) {
-            $id = $env:TDESKTOP_API_ID
-            $hash = $env:TDESKTOP_API_HASH
-          }
-          if (!$id -and !$hash -and $env:ALLOW_TEST_API -eq 'true') {
-            'API_MODE=test' >> $env:GITHUB_ENV
-            Write-Warning 'TEST ONLY API credentials: this executable is not suitable for distribution or reliable normal login.'
-          } elseif ($id -match '^[1-9][0-9]*$' -and $hash -match '^[0-9a-fA-F]{32}$') {
-            'API_MODE=custom' >> $env:GITHUB_ENV
-          } else {
-            throw 'Set TELEGRAM_API_ID + TELEGRAM_API_HASH (or TDESKTOP_API_ID + TDESKTOP_API_HASH) as repository Actions secrets. Alternatively explicitly enable allow_test_api for a test build only. Never put API hashes in workflow inputs.'
-          }
 
       - name: Prepare source layout and MSYS2 package fix
         run: |
@@ -127,18 +100,10 @@ jobs:
           )
 
       - name: Configure and build Release
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
-          TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $id = $env:TELEGRAM_API_ID
-          $hash = $env:TELEGRAM_API_HASH
-          if (!$id -and !$hash) { $id = $env:TDESKTOP_API_ID; $hash = $env:TDESKTOP_API_HASH }
-          $api = @('-D', 'TDESKTOP_API_TEST=ON')
-          if ($env:API_MODE -eq 'custom') { $api = @('-D', "TDESKTOP_API_ID=$id", '-D', "TDESKTOP_API_HASH=$hash") }
+          # Explicit owner-supplied placeholders, accepted only if the independent server allows them.
+          $api = @('-D', 'TDESKTOP_API_TEST=OFF', '-D', 'TDESKTOP_API_ID=1234567890', '-D', 'TDESKTOP_API_HASH=1234567890')
           Set-Location "$env:TBUILD\tdesktop\Telegram"
           & .\configure.bat x64 @api -D CMAKE_CONFIGURATION_TYPES=Release -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON *> "$env:GITHUB_WORKSPACE\logs\configure.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:GITHUB_WORKSPACE\logs\configure.log" -Tail 150; throw 'Configure failed.' }
@@ -164,7 +129,11 @@ jobs:
             architecture = 'x64'
             configuration = 'Release'
             api_mode = $env:API_MODE
-            note = 'Unsigned portable build. Filename alias only; in-app branding and DC/RSA settings are unchanged. Auto-update disabled.'
+            dc_id = 2
+            dc_ip = '193.151.158.60'
+            dc_port = 2398
+            rsa_fingerprint = '9092a605d9189818'
+            note = 'Independent-server build. Placeholder API credentials; unsigned and not runtime-tested. Official MTProto DC fallback and emergency config discovery disabled; this is not an OS-wide network sandbox.'
           } | ConvertTo-Json | Set-Content "$dist\build-info.json"
           $short = $env:SOURCE_SHA.Substring(0, 12)
           $zip = "$env:GITHUB_WORKSPACE\XDesktop-windows-x64-$short.zip"
@@ -230,7 +199,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: XDesktop Windows x64 (build ${{ github.run_number }})
           prerelease: true
-          body: 'Unsigned portable build. Check build-info.json for API mode; test API builds are not for distribution.'
+          body: 'Independent-server build: DC2 at 193.151.158.60:2398. Placeholder API credentials; unsigned and not runtime-tested.'
           files: |
             release-files/XDesktop-windows-x64-*.zip
             release-files/SHA256SUMS.txt

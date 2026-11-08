@@ -361,7 +361,7 @@ Instance::Private::Private(
 	}
 
 	if (fields.mainDcId != Fields::kNotSetMainDc) {
-		_mainDcId = fields.mainDcId;
+		_mainDcId = Fields::kDefaultMainDc;
 		_mainDcIdForced = true;
 	}
 
@@ -479,6 +479,9 @@ void Instance::Private::suggestMainDcId(DcId mainDcId) {
 }
 
 void Instance::Private::setMainDcId(DcId mainDcId) {
+	if (mainDcId != Fields::kDefaultMainDc) {
+		return; // Refuse migration away from the independent DC2.
+	}
 	if (!_mainSession) {
 		LOG(("MTP Error: attempting to change mainDcId in an MTP instance without main session."));
 		return;
@@ -542,14 +545,8 @@ void Instance::Private::badConfigurationError() {
 }
 
 void Instance::Private::syncHttpUnixtime() {
-	if (base::unixtime::http_valid() || _httpUnixtimeLoader) {
-		return;
-	}
-	_httpUnixtimeLoader = std::make_unique<SpecialConfigRequest>([=] {
-		InvokeQueued(_instance, [=] {
-			_httpUnixtimeLoader = nullptr;
-		});
-	}, isTestMode(), configValues().txtDomainString);
+	// Do not contact public emergency-config/time services.
+	// The operating-system clock must be correct for MTProto authentication.
 }
 
 void Instance::Private::restartedByTimeout(ShiftedDcId shiftedDcId) {
